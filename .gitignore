@@ -1,0 +1,9 @@
+.oat/
+.agent_tracer
+.agent_tracer_v2
+.agent_tracer_v3
+backend/blobs/
+__pycache__/
+*.pyc
+*.db
+.env
