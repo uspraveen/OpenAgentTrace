@@ -8,6 +8,9 @@ import hashlib
 import inspect
 import functools
 import contextvars
+import queue
+import threading
+import atexit
 from pathlib import Path
 from datetime import datetime
 
@@ -98,6 +101,34 @@ class StorageEngine:
             conn.close()
 
 storage = StorageEngine()
+
+# --- 2b. BACKGROUND WORKER (Non-Blocking Writes) ---
+_SPAN_QUEUE = queue.Queue()
+_STOP_EVENT = threading.Event()
+
+def _worker_loop():
+    """Reads completed spans from queue and writes to DB."""
+    while not _STOP_EVENT.is_set() or not _SPAN_QUEUE.empty():
+        try:
+            # Wait for a span (with timeout to check stop event)
+            span_data = _SPAN_QUEUE.get(timeout=0.1)
+            storage.save_span(span_data)
+            _SPAN_QUEUE.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"!! AgentTracer Worker Error: {e}")
+
+# Start the worker daemon
+_WORKER_THREAD = threading.Thread(target=_worker_loop, daemon=True)
+_WORKER_THREAD.start()
+
+def _shutdown_handler():
+    """Flushes remaining spans on exit."""
+    _STOP_EVENT.set()
+    _WORKER_THREAD.join(timeout=2.0) # Wait up to 2s for flush
+
+atexit.register(_shutdown_handler)
 
 # --- 3. THE TRACER (SDK) ---
 def get_current_trace_id():
@@ -197,7 +228,8 @@ def _execute_sync(func, args, kwargs, span_data, token):
 def _finalize_span(span_data, token):
     span_data['end_time'] = time.time()
     span_data['duration'] = span_data['end_time'] - span_data['start_time']
-    storage.save_span(span_data)
+    # Push to queue instead of blocking write
+    _SPAN_QUEUE.put(span_data)
     ctx_span_id.reset(token)
 
 def trace(name=None, span_type="function"):

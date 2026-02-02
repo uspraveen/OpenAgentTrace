@@ -1,23 +1,34 @@
 import json
+import sqlite3
 import hashlib
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 import duckdb
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, String, Float, Text, JSON
+from sqlalchemy import create_engine, Column, String, Float, Text, JSON, Integer
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # --- CONFIG ---
 BASE_DIR = Path(".")
-BLOB_DIR = BASE_DIR / "blobs"
+# Fix: Point to the same directory as the SDK
+TRACER_DIR = BASE_DIR / ".agent_tracer"
+BLOB_DIR = TRACER_DIR / "blobs"
+TRACER_DIR.mkdir(exist_ok=True)
 BLOB_DIR.mkdir(exist_ok=True)
-DATABASE_URL = "sqlite:///./tracer_v4.db"
+
+# Use absolute path to avoid confusion
+db_path = TRACER_DIR / "traces.db"
+DATABASE_URL = f"sqlite:///{db_path}"
 DUCK_DB_PATH = "analytics.duckdb"
+
+# --- GLOBAL STATE ---
+DUCKDB_CONN = None
 
 # --- SQLALCHEMY SETUP (Transactional Graph) ---
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -39,13 +50,33 @@ class SpanModel(Base):
     input_hash = Column(String, nullable=True)
     output_hash = Column(String, nullable=True)
     metadata_json = Column(JSON, nullable=True)
+    score = Column(Integer, nullable=True)     # -1 (Bad) to 1 (Good)
+    feedback = Column(Text, nullable=True)     # User comments
 
 Base.metadata.create_all(bind=engine)
 
-# --- DUCKDB SETUP (Analytical Metrics) ---
-def init_duckdb():
-    conn = duckdb.connect(DUCK_DB_PATH)
-    conn.execute("""
+# --- LIFESPAN (Startup/Shutdown) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Create connection and ensure table exists
+    # MIGRATION: Ensure new columns exist
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("ALTER TABLE spans ADD COLUMN score INTEGER")
+                cursor.execute("ALTER TABLE spans ADD COLUMN feedback TEXT")
+                print("✅ Applied migration: Added score/feedback columns")
+            except Exception:
+                # Columns likely exist
+                pass
+    except Exception as e:
+        print(f"⚠️ Migration warning: {e}")
+
+    global DUCKDB_CONN
+    print("Initialize DuckDB connection...")
+    DUCKDB_CONN = duckdb.connect(DUCK_DB_PATH)
+    DUCKDB_CONN.execute("""
         CREATE TABLE IF NOT EXISTS metrics (
             time TIMESTAMP,
             trace_id VARCHAR,
@@ -58,9 +89,10 @@ def init_duckdb():
             tokens_total INTEGER DEFAULT 0
         )
     """)
-    conn.close()
-
-init_duckdb()
+    yield
+    # Shutdown
+    print("Closing DuckDB connection...")
+    DUCKDB_CONN.close()
 
 # --- BLOB STORAGE HELPERS ---
 def save_blob(data: Any) -> Optional[str]:
@@ -83,7 +115,7 @@ def get_blob(blob_hash: Optional[str]) -> Any:
     return None
 
 # --- API ---
-app = FastAPI(title="Agent Tracer V6")
+app = FastAPI(title="Agent Tracer V6", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -141,9 +173,9 @@ def ingest_span(span: SpanIngest):
         tokens = span.meta.get("usage", {}).get("total_tokens", 0)
         cost = span.meta.get("cost", 0.0)
         
-        d_conn = duckdb.connect(DUCK_DB_PATH)
-        # Using epoch_ms requires timestamp in ms
-        d_conn.execute(f"""
+        # Using global connection
+        # epoch_ms requires timestamp in ms
+        DUCKDB_CONN.execute(f"""
             INSERT INTO metrics VALUES (
                 epoch_ms({int(span.start_time * 1000)}), 
                 ?, ?, ?, ?, ?, ?, ?, ?
@@ -152,8 +184,7 @@ def ingest_span(span: SpanIngest):
             span.trace_id, span.span_id, span.name, span.type,
             span.status, span.duration or 0.0, cost, tokens
         ))
-        d_conn.close()
-
+        
     return {"status": "ok"}
 
 @app.get("/traces")
@@ -195,9 +226,29 @@ def get_trace_details(trace_id: str):
     db.close()
     return enriched
 
+class FeedbackRequest(BaseModel):
+    score: int
+    feedback: Optional[str] = None
+
+@app.post("/spans/{span_id}/score")
+def score_span(span_id: str, req: FeedbackRequest):
+    db = SessionLocal()
+    span = db.query(SpanModel).filter(SpanModel.span_id == span_id).first()
+    if not span:
+        db.close()
+        raise HTTPException(status_code=404, detail="Span not found")
+    
+    span.score = req.score
+    span.feedback = req.feedback
+    db.commit()
+    db.close()
+    return {"status": "updated", "span_id": span_id}
+
+
+
 @app.get("/analytics/dashboard")
 def get_analytics(start: Optional[str] = None, end: Optional[str] = None):
-    con = duckdb.connect(DUCK_DB_PATH)
+    # Use global connection
     
     # Base Time Filter Logic
     time_filter = "1=1"
@@ -217,7 +268,7 @@ def get_analytics(start: Optional[str] = None, end: Optional[str] = None):
         FROM metrics 
         WHERE {time_filter}
     """
-    res_err = con.execute(err_query, params).fetchone()
+    res_err = DUCKDB_CONN.execute(err_query, params).fetchone()
     error_rate = res_err[0] if res_err and res_err[0] is not None else 0.0
 
     # 2. Latency Stats (Filtered)
@@ -227,7 +278,7 @@ def get_analytics(start: Optional[str] = None, end: Optional[str] = None):
         WHERE type IN ('llm', 'db', 'vector_db') AND {time_filter} 
         GROUP BY type
     """
-    lat_stats = con.execute(lat_query, params).fetchall()
+    lat_stats = DUCKDB_CONN.execute(lat_query, params).fetchall()
 
     # 3. Daily Trend (Filtered)
     # Default to 7 days if no specific filter is applied
@@ -241,10 +292,8 @@ def get_analytics(start: Optional[str] = None, end: Optional[str] = None):
         GROUP BY 1 
         ORDER BY 1 ASC
     """
-    daily = con.execute(trend_query, chart_params).fetchall()
+    daily = DUCKDB_CONN.execute(trend_query, chart_params).fetchall()
     
-    con.close()
-
     return {
         "error_rate": round(error_rate, 2),
         "latency_by_type": [{"type": r[0], "p95": round(r[1], 3), "avg": round(r[2], 3)} for r in lat_stats],
@@ -260,17 +309,13 @@ def delete_trace(trace_id: str):
     db.close()
 
     # 2. Delete from DuckDB
-    d_conn = duckdb.connect(DUCK_DB_PATH)
-    d_conn.execute("DELETE FROM metrics WHERE trace_id = ?", (trace_id,))
-    d_conn.close()
+    DUCKDB_CONN.execute("DELETE FROM metrics WHERE trace_id = ?", (trace_id,))
     
     return {"status": "deleted", "id": trace_id}
 
 @app.delete("/analytics/reset")
 def reset_analytics():
-    con = duckdb.connect(DUCK_DB_PATH)
-    con.execute("DELETE FROM metrics")
-    con.close()
+    DUCKDB_CONN.execute("DELETE FROM metrics")
     return {"status": "metrics_cleared"}
 
 @app.delete("/traces/reset")

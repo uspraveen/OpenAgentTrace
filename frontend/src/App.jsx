@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import ReactFlow, { Background, Controls, useNodesState, useEdgesState, MarkerType } from 'reactflow';
+import { ThumbsUp, ThumbsDown } from 'lucide-react';
 import 'reactflow/dist/style.css';
 import axios from 'axios';
-import { Layers, Sun, Moon, Trash2, X, Activity, Server, Database, Cpu, Zap } from 'lucide-react';
+import { Layers, Sun, Moon, Trash2, X, Activity, Server, Database, Cpu, Zap, BarChart2 } from 'lucide-react';
 import MetricsDashboard from './MetricsDashboard';
+import WaterfallView from './components/WaterfallView';
 
 const API_URL = "http://127.0.0.1:8000";
 
@@ -12,8 +14,9 @@ export default function App() {
   const [traces, setTraces] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [selectedTrace, setSelectedTrace] = useState(null);
+  const [vizMode, setVizMode] = useState('graph'); // 'graph' or 'waterfall'
   const [darkMode, setDarkMode] = useState(true);
-  
+
   // React Flow State
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -33,12 +36,12 @@ export default function App() {
       // A. Fetch Traces
       const tRes = await axios.get(`${API_URL}/traces`);
       setTraces(tRes.data);
-      
+
       // B. Fetch Analytics with Params
       const query = new URLSearchParams(currentParams).toString();
       const aRes = await axios.get(`${API_URL}/analytics/dashboard?${query}`);
       setAnalytics(aRes.data);
-      
+
     } catch (e) { console.error("API Error", e); }
   };
 
@@ -83,14 +86,22 @@ export default function App() {
     } catch (err) { console.error("Failed to delete", err); }
   };
 
-  // 6. Load Graph when Trace Selected
+  // 6. Handle Feedback
+  const submitFeedback = async (spanId, score) => {
+    try {
+      await axios.post(`${API_URL}/spans/${spanId}/score`, { score });
+      alert("Feedback submitted!");
+    } catch (e) { console.error("Feedback failed", e); }
+  };
+
+  // 7. Load Graph when Trace Selected
   useEffect(() => {
     if (!selectedTrace) return;
     const loadGraph = async () => {
       try {
         const res = await axios.get(`${API_URL}/traces/${selectedTrace}`);
         const spans = res.data;
-        
+
         const nodeBg = darkMode ? 'rgba(30, 41, 59, 0.8)' : 'rgba(255, 255, 255, 0.9)';
         const nodeColor = darkMode ? '#fff' : '#000';
         const borderColor = darkMode ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.1)';
@@ -100,12 +111,12 @@ export default function App() {
           data: { ...s, label: s.name },
           position: { x: i * 220, y: s.parent_span_id ? 150 + (i * 60) : 50 },
           style: {
-            background: nodeBg, 
-            color: nodeColor, 
+            background: nodeBg,
+            color: nodeColor,
             border: s.status === 'FAILURE' ? '1px solid #EF4444' : `1px solid ${borderColor}`,
             backdropFilter: 'blur(10px)',
-            padding: '12px', 
-            borderRadius: '12px', 
+            padding: '12px',
+            borderRadius: '12px',
             minWidth: '160px',
             fontSize: '12px',
             boxShadow: '0 8px 32px 0 rgba(31, 38, 135, 0.15)'
@@ -120,23 +131,22 @@ export default function App() {
 
         setNodes(newNodes);
         setEdges(newEdges);
-      } catch (e) {}
+      } catch (e) { }
     };
     loadGraph();
   }, [selectedTrace, darkMode]);
 
   return (
-    <div className={`flex h-screen overflow-hidden font-sans transition-colors duration-500 ${
-      darkMode 
-      ? 'bg-gradient-to-br from-gray-900 via-slate-900 to-black text-white' 
+    <div className={`flex h-screen overflow-hidden font-sans transition-colors duration-500 ${darkMode
+      ? 'bg-gradient-to-br from-gray-900 via-slate-900 to-black text-white'
       : 'bg-gradient-to-br from-gray-100 via-blue-50 to-white text-gray-900'
-    } animate-gradient`}>
-      
+      } animate-gradient`}>
+
       {/* SIDEBAR (GLASS PANEL) */}
       <div className="w-72 flex flex-col glass-panel z-20">
         <div className="p-5 border-b border-white/10 flex justify-between items-center">
           <h1 className="text-lg font-bold tracking-tight flex items-center gap-2">
-            <Activity className="text-cyan-400" size={20} /> 
+            <Activity className="text-cyan-400" size={20} />
             <span className="bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-500">
               AgentTracer
             </span>
@@ -145,37 +155,48 @@ export default function App() {
             {darkMode ? <Sun size={16} /> : <Moon size={16} />}
           </button>
         </div>
-        
+
         <div className="flex gap-2 p-3">
-          <TabButton active={view === 'traces'} onClick={() => setView('traces')} label="Traces" icon={<Layers size={14}/>} />
-          <TabButton active={view === 'analytics'} onClick={() => setView('analytics')} label="Analytics" icon={<Zap size={14}/>} />
+          <TabButton active={view === 'traces'} onClick={() => setView('traces')} label="Traces" icon={<Layers size={14} />} />
+          <TabButton active={view === 'analytics'} onClick={() => setView('analytics')} label="Analytics" icon={<Zap size={14} />} />
         </div>
 
-        {/* TRACE LIST */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-2">
-          {traces.map(t => (
-            <div key={t.trace_id} 
-              onClick={() => { setView('traces'); setSelectedTrace(t.trace_id); }}
-              className={`group p-3 rounded-xl cursor-pointer border transition-all duration-200 relative ${
-                selectedTrace === t.trace_id 
-                ? 'bg-cyan-500/10 border-cyan-500/50 shadow-[0_0_15px_rgba(6,182,212,0.15)]' 
-                : 'hover:bg-white/5 border-transparent hover:border-white/10'
-              }`}>
-              
-              <div className="flex justify-between items-start">
-                <div className="font-medium text-sm truncate w-40">{t.name}</div>
-                <button 
-                  onClick={(e) => handleDeleteTrace(e, t.trace_id)}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition"
-                  title="Delete Trace"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-              
-              <div className="text-xs opacity-60 flex justify-between mt-2">
-                <span>{new Date(t.start_time).toLocaleTimeString()}</span>
-                <span className={t.status==='SUCCESS'?'text-emerald-400':'text-rose-400 font-bold'}>{t.status}</span>
+        {/* TRACE LIST (Grouped by Date) */}
+        <div className="flex-1 overflow-y-auto p-3 space-y-4">
+          {Object.entries(traces.reduce((groups, t) => {
+            const date = new Date(t.start_time).toLocaleDateString();
+            if (!groups[date]) groups[date] = [];
+            groups[date].push(t);
+            return groups;
+          }, {})).map(([date, groupTraces]) => (
+            <div key={date}>
+              <div className="text-[10px] font-bold opacity-40 uppercase tracking-widest mb-2 ml-1">{date}</div>
+              <div className="space-y-2">
+                {groupTraces.map(t => (
+                  <div key={t.trace_id}
+                    onClick={() => { setView('traces'); setSelectedTrace(t.trace_id); }}
+                    className={`group p-3 rounded-xl cursor-pointer border transition-all duration-200 relative ${selectedTrace === t.trace_id
+                      ? 'bg-cyan-500/10 border-cyan-500/50 shadow-[0_0_15px_rgba(6,182,212,0.15)]'
+                      : 'hover:bg-white/5 border-transparent hover:border-white/10'
+                      }`}>
+
+                    <div className="flex justify-between items-start">
+                      <div className="font-medium text-sm truncate w-40">{t.name}</div>
+                      <button
+                        onClick={(e) => handleDeleteTrace(e, t.trace_id)}
+                        className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition"
+                        title="Delete Trace"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+
+                    <div className="text-xs opacity-60 flex justify-between mt-2">
+                      <span>{new Date(t.start_time).toLocaleTimeString()}</span>
+                      <span className={t.status === 'SUCCESS' ? 'text-emerald-400' : 'text-rose-400 font-bold'}>{t.status}</span>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           ))}
@@ -185,16 +206,40 @@ export default function App() {
       {/* MAIN CONTENT AREA */}
       <div className="flex-1 relative z-10">
         {view === 'analytics' ? (
-          <MetricsDashboard 
-            data={analytics} 
-            darkMode={darkMode} 
-            onRefresh={handleRefresh} 
+          <MetricsDashboard
+            data={analytics}
+            darkMode={darkMode}
+            onRefresh={handleRefresh}
           />
         ) : (
-          <ReactFlow nodes={nodes} edges={edges} onNodeClick={(_, n) => setInspectorData(n.data)} fitView>
-            <Background color={darkMode ? "#555" : "#ccc"} gap={25} size={1} />
-            <Controls className="glass rounded-lg overflow-hidden border-white/10 text-black dark:text-white" />
-          </ReactFlow>
+          <>
+            {/* VIEW TOGGLE */}
+            <div className="absolute top-4 right-4 z-40 bg-black/50 backdrop-blur-md rounded-lg p-1 border border-white/10 flex gap-1">
+              <button onClick={() => setVizMode('graph')} className={`p-2 rounded ${vizMode === 'graph' ? 'bg-cyan-500 text-white' : 'text-gray-400 hover:text-white'}`}>
+                <Activity size={16} />
+              </button>
+              <button onClick={() => setVizMode('waterfall')} className={`p-2 rounded ${vizMode === 'waterfall' ? 'bg-cyan-500 text-white' : 'text-gray-400 hover:text-white'}`}>
+                <BarChart2 size={16} className="rotate-90" />
+              </button>
+            </div>
+
+            {vizMode === 'graph' ? (
+              <ReactFlow nodes={nodes} edges={edges} onNodeClick={(_, n) => setInspectorData(n.data)} fitView>
+                <Background color={darkMode ? "#555" : "#ccc"} gap={25} size={1} />
+                <Controls className="glass rounded-lg overflow-hidden border-white/10 text-black dark:text-white" />
+              </ReactFlow>
+            ) : (
+              <WaterfallView
+                // We need to fetch the raw spans too, but 'nodes' actually has the span data in .data
+                // Wait, 'nodes' is built from 'spans', so we need 'spans' variable.
+                // But 'spans' was local to useEffect. We need to store it in state?
+                // Actually 'nodes' contains all the data we need in 'data' prop.
+                spans={nodes.map(n => n.data)}
+                darkMode={darkMode}
+                onSpanClick={setInspectorData}
+              />
+            )}
+          </>
         )}
       </div>
 
@@ -206,16 +251,29 @@ export default function App() {
               <NodeTypeIcon type={inspectorData.type} />
               <h2 className="text-lg font-bold truncate">{inspectorData.name}</h2>
             </div>
-            <button onClick={() => setInspectorData(null)} className="hover:text-rose-400"><X size={18}/></button>
+            <button onClick={() => setInspectorData(null)} className="hover:text-rose-400"><X size={18} /></button>
           </div>
-          
+
+          {/* FEEDBACK CONTROLS */}
+          <div className="flex gap-2 mb-6 p-3 bg-white/5 rounded-xl border border-white/10 justify-between items-center">
+            <span className="text-xs font-bold opacity-50 uppercase tracking-wider">Feedback</span>
+            <div className="flex gap-2">
+              <button onClick={() => submitFeedback(inspectorData.span_id, 1)} className="p-2 hover:bg-green-500/20 rounded hover:text-green-400 transition" title="Good Response">
+                <ThumbsUp size={16} />
+              </button>
+              <button onClick={() => submitFeedback(inspectorData.span_id, -1)} className="p-2 hover:bg-rose-500/20 rounded hover:text-red-400 transition" title="Bad Response">
+                <ThumbsDown size={16} />
+              </button>
+            </div>
+          </div>
+
           <DataSection title="Metadata" data={inspectorData.meta} />
           <DataSection title="Inputs" data={inspectorData.inputs} />
           <DataSection title="Outputs" data={inspectorData.outputs} />
-          
+
           {inspectorData.error_message && (
             <div className="bg-rose-500/10 border border-rose-500/30 p-4 rounded-xl text-rose-300 text-sm mt-4">
-              <div className="font-bold mb-1 flex items-center gap-2"><X size={14}/> Error Trace</div>
+              <div className="font-bold mb-1 flex items-center gap-2"><X size={14} /> Error Trace</div>
               {inspectorData.error_message}
             </div>
           )}
@@ -228,18 +286,17 @@ export default function App() {
 // --- SUB COMPONENTS ---
 
 const TabButton = ({ active, onClick, label, icon }) => (
-  <button onClick={onClick} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-2 ${
-      active ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-900/50' : 'hover:bg-white/5 opacity-70 hover:opacity-100'
+  <button onClick={onClick} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-2 ${active ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-900/50' : 'hover:bg-white/5 opacity-70 hover:opacity-100'
     }`}>
     {icon} {label}
   </button>
 );
 
 const NodeTypeIcon = ({ type }) => {
-  if (type === 'llm') return <Cpu size={16} className="text-purple-400"/>;
-  if (type === 'db') return <Database size={16} className="text-amber-400"/>;
-  if (type === 'vector_db') return <Server size={16} className="text-emerald-400"/>;
-  return <Activity size={16} className="text-blue-400"/>;
+  if (type === 'llm') return <Cpu size={16} className="text-purple-400" />;
+  if (type === 'db') return <Database size={16} className="text-amber-400" />;
+  if (type === 'vector_db') return <Server size={16} className="text-emerald-400" />;
+  return <Activity size={16} className="text-blue-400" />;
 };
 
 const DataSection = ({ title, data }) => {

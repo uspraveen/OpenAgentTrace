@@ -8,7 +8,7 @@ from instrumentor import auto_instrument
 
 # --- 2. SETUP CLIENTS ---
 # (Ideally, use os.getenv for keys, but keeping your code for now)
-client = OpenAI(api_key="") 
+client = OpenAI(api_key="--") 
 DB_PATH = "commerce.db"
 
 # --- 3. DATABASE FUNCTIONS (SQL Layer) ---
@@ -105,9 +105,6 @@ if __name__ == "__main__":
         # Scenario C: Unknown User
         asyncio.run(handle_support_request("fake@email.com", "Where is my stuff?"))
         
-        import time
-        print("⏳ Flushing traces to backend...")
-        time.sleep(3) 
         print("✅ Done.")
         
     except KeyboardInterrupt:
